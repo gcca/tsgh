@@ -1,0 +1,91 @@
+name: "Tailscale Up"
+description: "Generates a temporary Tailscale auth key, installs Tailscale, and connects to the tailnet"
+
+inputs:
+  ts_tailnet:
+    description: "Tailscale tailnet name"
+    required: true
+  ts_api_token:
+    description: "Tailscale API access token"
+    required: true
+  tags:
+    description: "Comma-separated ACL tags for the ephemeral device"
+    required: false
+    default: "tag:gh-action"
+
+outputs:
+  key_id:
+    description: "ID of the generated auth key, used to revoke it with tailscale-down"
+    value: ${{ steps.generate-key.outputs.key_id }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Generate Tailscale auth key
+      id: generate-key
+      shell: bash
+      run: |
+        TAGS_JSON=$(echo "${{ inputs.tags }}" | jq -Rc '[split(",")[] | ltrimstr(" ") | rtrimstr(" ")]')
+
+        RESPONSE=$(curl -s -X POST \
+          "https://api.tailscale.com/api/v2/tailnet/${{ inputs.ts_tailnet }}/keys" \
+          -H "Authorization: Bearer ${{ inputs.ts_api_token }}" \
+          -H "Content-Type: application/json" \
+          -d "{
+            \"capabilities\": {
+              \"devices\": {
+                \"create\": {
+                  \"reusable\": false,
+                  \"ephemeral\": true,
+                  \"tags\": $TAGS_JSON
+                }
+              }
+            },
+            \"expirySeconds\": 3600,
+            \"description\": \"GitHub Actions temporary key\"
+          }")
+
+        TS_KEY=$(echo "$RESPONSE" | jq -r '.key // empty')
+        TS_ID=$(echo "$RESPONSE" | jq -r '.id // empty')
+
+        if [ -z "$TS_KEY" ]; then
+          echo "Failed to generate Tailscale auth key"
+          echo "Response: $RESPONSE"
+          exit 1
+        fi
+
+        echo "key=$TS_KEY" >> $GITHUB_OUTPUT
+        echo "key_id=$TS_ID" >> $GITHUB_OUTPUT
+
+    - name: Cache Tailscale binaries
+      id: cache-ts
+      uses: actions/cache@v4
+      with:
+        path: ~/tailscale-bin
+        key: tailscale-${{ runner.os }}-latest
+
+    - name: Restore Tailscale from cache
+      if: steps.cache-ts.outputs.cache-hit == 'true'
+      shell: bash
+      run: |
+        sudo cp ~/tailscale-bin/tailscale /usr/bin/tailscale
+        sudo cp ~/tailscale-bin/tailscaled /usr/sbin/tailscaled
+        sudo tailscaled --state=mem: &
+        sleep 1
+
+    - name: Install Tailscale
+      if: steps.cache-ts.outputs.cache-hit != 'true'
+      shell: bash
+      run: curl -fsSL https://tailscale.com/install.sh | sh
+
+    - name: Save Tailscale to cache
+      if: steps.cache-ts.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        mkdir -p ~/tailscale-bin
+        sudo cp /usr/bin/tailscale ~/tailscale-bin/tailscale
+        sudo cp /usr/sbin/tailscaled ~/tailscale-bin/tailscaled
+
+    - name: Connect Tailscale
+      shell: bash
+      run: sudo tailscale up --authkey="${{ steps.generate-key.outputs.key }}" --accept-routes

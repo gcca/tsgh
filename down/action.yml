@@ -1,0 +1,28 @@
+name: "Tailscale Down"
+description: "Revokes the temporary Tailscale auth key and disconnects from the tailnet"
+
+inputs:
+  ts_tailnet:
+    description: "Tailscale tailnet name"
+    required: true
+  ts_api_token:
+    description: "Tailscale API access token"
+    required: true
+  key_id:
+    description: "Auth key ID to revoke (output of tailscale-up)"
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    - name: Revoke Tailscale auth key
+      shell: bash
+      run: |
+        curl -s -X DELETE \
+          "https://api.tailscale.com/api/v2/tailnet/${{ inputs.ts_tailnet }}/keys/${{ inputs.key_id }}" \
+          -H "Authorization: Bearer ${{ inputs.ts_api_token }}"
+        echo "Tailscale auth key revoked"
+
+    - name: Disconnect Tailscale
+      shell: bash
+      run: sudo tailscale down
